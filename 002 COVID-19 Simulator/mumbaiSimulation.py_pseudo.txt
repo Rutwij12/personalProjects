@@ -1,0 +1,383 @@
+# Importing Necessary Libraries
+
+IMPORT os
+
+from os IMPORT listdir
+
+IMPORT re
+
+IMPORT pickle
+
+IMPORT numpy as np
+
+IMPORT pandas as pd
+
+IMPORT matplotlib.pyplot as plt
+
+IMPORT geopandas as gpd
+
+IMPORT osmnx as ox
+
+from descartes IMPORT PolygonPatch
+
+from shapely.geometry IMPORT Point, LineString, Polygon, MultiPolygon
+
+from mumbaiVirus IMPORT *
+
+from pyproj IMPORT CRS
+
+IMPORT contextily as ctx
+
+IMPORT matplotlib.colors as colors
+
+from matplotlib.colors IMPORT LinearSegmentedColormap
+
+from tqdm IMPORT tqdm_notebook
+
+
+
+CALL def seirPlot(result): 
+
+        # Plotting Every 12th value per iteration to account FOR 1 day. (Each time step is 2 hrs).
+
+        plt.plot(result[::12, 0], color='r', label='S')
+
+        plt.plot(result[::12, 1], color='g', label='E')
+
+        plt.plot(result[::12, 2], color='b', label='I')
+
+        plt.plot(result[::12, 3], color='y', label='R')
+
+        plt.plot(result[::12, 4], color='c', label='H')
+
+        plt.legend()
+
+        plt.show()
+
+
+
+with open(os.path.abspath("covData/Yerevan_population.pkl"), "rb") as population:
+
+    SET mumbaiPopulation TO pickle.load(population)[:,:531]
+
+
+
+with open(os.path.abspath("covData/Yerevan_OD_matrices.pkl"), "rb") as originDestinationMatrix:
+
+        SET originDestinationMatrix TO pickle.load(originDestinationMatrix)[:,:531,:531]
+
+
+
+SET timeStep TO originDestinationMatrix.shape[0] #84 time steps
+
+SET cells TO mumbaiPopulation.shape[1] #531 cells
+
+SET totalPopulation TO 1000000.0 #The population of Mumbai is approx 12.5 million, but FOR the purpose of this simulation, I've set the population as 1 million
+
+
+
+SET initialInd TO [334,353,196,445,162,297]
+
+SET initial TO np.zeros(cells)
+
+SET initial[initialInd] TO 100
+
+
+
+SET model TO par(r0Number TO 2.4, DE TO 5.6 * 12, infectiousPeriod TO 5.2 * 12, initialRandomInfections TO initial,  HospitalisationRate TO 0.1, timeInHospital TO 15 * 12)
+
+
+
+SET # lockdown strictness TO 1, ie no lockdowns
+
+SET lockdownStrictness TO np.ones(originDestinationMatrix.shape)
+
+SET iterations TO 3000
+
+SET result TO {}
+
+SET initialInfections TO 100
+
+SET result['baseline'] TO seirModel(model, mumbaiPopulation, originDestinationMatrix, lockdownStrictness, iterations, initialInfections)
+
+
+
+OUTPUT("Max Number of hospitalised people: ", int(result["baseline"][0][:, 4].max()),
+
+       "\n",
+
+       "Day with max hospitalised people: ", int(result['baseline'][0][:, 4].argmax()/12))
+
+seirPlot(result["baseline"][0])
+
+
+
+# Now Creating the Spacial Visualisation
+
+# Setting the CRS to 4326
+
+SET crs TO CRS.from_epsg(4326)
+
+
+
+# As referenced IN the geopandas into file, we need to first laod the Mumbai City
+
+
+
+SET mumbaiCity TO ox.geocode_to_gdf('Mumbai, India')
+
+SET mumbaiCity TO ox.projection.project_gdf(mumbaiCity)
+
+SET ax TO mumbaiCity.plot(ec='none')
+
+SET _ TO ax.axis('off')
+
+SET geometry TO mumbaiCity['geometry'].iloc[0]
+
+SET geometry_cut TO ox.utils_geo._quadrat_cut_geometry(geometry, quadrat_width TO 1050)
+
+SET polygonList TO [p FOR p IN geometry_cut]
+
+SET west, south, east, north TO mumbaiCity.unary_union.bounds
+
+SET fig, ax TO plt.subplots(figsize=(20,20), dpi=50)
+
+
+
+FOR polygon, n IN zip(geometry_cut, np.arange(len(polygonList))):
+
+    SET polygonCentre TO polygon.representative_point().coords[:][0]
+
+    SET patch TO PolygonPatch(polygon, fc='#ffffff', ec='#000000', alpha=0.5, zorder=2)
+
+    ax.add_patch(patch)
+
+    plt.annotate(xy=polygonCentre, text=n, horizontalalignment='center', size=12)
+
+
+
+ax.set_xlim(west, east)
+
+ax.set_ylim(south, north)
+
+ax.axis('off')
+
+
+
+SET polygonFrame TO gpd.GeoDataFrame(geometry=polygonList)
+
+SET polygonFrame.crs TO mumbaiCity.crs
+
+SET polygonFrame TO polygonFrame.to_crs(epsg=3857)
+
+SET west, south, east, north TO polygonFrame.unary_union.bounds
+
+SET ax TO polygonFrame.plot(figsize=(10,10), alpha=0.5, edgecolor='k')
+
+ctx.add_basemap(ax, zoom='auto')
+
+ax.set_xlim(west, east)
+
+ax.set_ylim(south, north)
+
+
+
+SET polygonFrame TO polygonFrame.to_crs(epsg=3857)
+
+SET west, south, east, north TO polygonFrame.unary_union.bounds
+
+SET baseline TO result['baseline'][1][::12, :, :]
+
+
+
+SET hospitalisation TO result['baseline'][0][::12, 4]
+
+
+
+# find maximum hospitalisation value to make sure the color intensities IN the animation are anchored against it
+
+SET max_exp_ind TO np.where(baseline[:, 1, :] EQUALS baseline[:, 1, :].max())[0].item()
+
+SET max_exp_val TO baseline[:, 1, :].max()
+
+
+
+OUTPUT(max_exp_ind, max_exp_val)
+
+
+
+SET ncolors TO 256
+
+SET color_array TO plt.get_cmap('Reds')(range(ncolors))
+
+
+
+plt.rcParams.update({"axes.labelcolor":"slategrey"})
+
+SET cmap TO plt.cm.get_cmap("Blues")
+
+SET blue TO cmap(200)
+
+
+
+FOR time_step IN tqdm_notebook(range(1,251)):
+
+    SET polygonFrame['exposed'] TO baseline[time_step-1, 1, :]
+
+    SET fig, ax TO plt.subplots(figsize=(14, 14), dpi=72)
+
+    # Picked 32, because it is so small, it is unrecognisable
+
+    SET polygonFrame.loc[polygonFrame.index EQUALS 32, 'exposed'] TO max_exp_val + 1
+
+    polygonFrame.plot(ax=ax, facecolor='none', edgecolor='gray', alpha=0.5, linewidth=0.5, zorder=2)
+
+    polygonFrame.plot(ax=ax, column='exposed', cmap='Reds', zorder=3)
+
+
+
+    ctx.add_basemap(ax, attribution="", url=ctx.sources.ST_TONER_LITE, zoom='auto', alpha=0.6)
+
+
+
+    ax.set_xlim(west, east)
+
+    ax.set_ylim(south, north)
+
+    ax.axis('off')
+
+    plt.tight_layout()
+
+
+
+    SET inset_ax TO fig.add_axes([0.6, 0.14, 0.37, 0.27])
+
+    inset_ax.patch.set_alpha(0.5)
+
+
+
+    inset_ax.plot(baseline[:time_step, 0].sum(axis=1), label="susceptible", color=blue, ls='-', lw=1.5, alpha=0.8)
+
+    inset_ax.plot(baseline[:time_step, 1].sum(axis=1), label="exposed", color='g', ls='-', lw=1.5, alpha=0.8)
+
+    inset_ax.plot(baseline[:time_step, 2].sum(axis=1), label="infectious", color='r', ls='-', lw=1.5, alpha=0.8)
+
+    inset_ax.plot(baseline[:time_step, 3].sum(axis=1), label="recovered", color='y', ls='-', lw=1.5, alpha=0.8)
+
+    inset_ax.plot(hospitalisation[:time_step], label="hospitalised", color='purple', ls='-', lw=1.5, alpha=0.8)
+
+
+
+    inset_ax.scatter((time_step-1), baseline[(time_step-1), 0].sum(), color=blue, s=50, alpha=0.2)
+
+    inset_ax.scatter((time_step-1), baseline[(time_step-1), 1].sum(), color='g', s=50, alpha=0.2)
+
+    inset_ax.scatter((time_step-1), baseline[(time_step-1), 2].sum(), color='r', s=50, alpha=0.2)
+
+    inset_ax.scatter((time_step-1), baseline[(time_step-1), 3].sum(), color='y', s=50, alpha=0.2)
+
+    inset_ax.scatter((time_step-1), hospitalisation[(time_step-1)], color='purple', s=50, alpha=0.2)
+
+
+
+    inset_ax.fill_between(np.arange(0, time_step), np.maximum(baseline[:time_step, 0].sum(axis=1), \
+
+                                                              baseline[:time_step, 3].sum(axis=1)), alpha=0.035,
+
+                          color='r')
+
+    inset_ax.plot([time_step, time_step], [0, max(baseline[(time_step - 1), 0].sum(), \
+
+                                                  baseline[(time_step - 1), 3].sum())], ls='--', lw=0.7, alpha=0.8,
+
+                  color='r')
+
+
+
+    inset_ax.set_ylabel('Population', size=18, alpha=1, rotation=90)
+
+    inset_ax.set_xlabel('Days', size=18, alpha=1)
+
+    inset_ax.yaxis.set_label_coords(-0.15, 0.55)
+
+    inset_ax.tick_params(direction='in', size=10)
+
+    inset_ax.set_xlim(-4, 254)
+
+    inset_ax.set_ylim(-24000, 1024000)
+
+    plt.xticks(fontsize=14)
+
+    plt.yticks(fontsize=14)
+
+    inset_ax.grid(alpha=0.4)
+
+
+
+    inset_ax.spines['right'].set_visible(False)
+
+    inset_ax.spines['top'].set_visible(False)
+
+
+
+    inset_ax.spines['left'].set_color('darkslategrey')
+
+    inset_ax.spines['bottom'].set_color('darkslategrey')
+
+    inset_ax.tick_params(axis='x', colors='darkslategrey')
+
+    inset_ax.tick_params(axis='y', colors='darkslategrey')
+
+    plt.legend(prop={'size': 14, 'weight': 'light'}, framealpha=0.5)
+
+
+
+    plt.title("Mumbai Covid-19 spreading on day: {}".format(time_step), fontsize=18, color='dimgray')
+
+
+
+    # plt.savefig("MumbaiPlots/flows_{}.jpg".format(time_step), dpi=72)
+
+
+
+# ----------------------------
+
+
+
+CALL def sort_in_order(l): 
+
+    """sorts a given iterable where
+
+    l is the iterable to be sorted"""
+
+
+
+    SET convert TO lambda text: int(text) IF text.isdigit() else text
+
+    SET alphanumeric_key TO lambda key: [convert(c) FOR c IN re.split('([0-9]+)', key)]
+
+    RETURN sorted(l, key=alphanumeric_key)
+
+
+
+
+
+SET filenames TO listdir("MumbaiPlots/")
+
+SET filenames TO sort_in_order(filenames)
+
+OUTPUT(filenames)
+
+
+
+IMPORT imageio
+
+
+
+with imageio.get_writer('Mumbai.gif', mode='I', fps=16) as writer:
+
+    FOR filename IN tqdm_notebook(filenames):
+
+        image=imageio.imread('MumbaiPlots/{}'.format(filename))
+
+        writer.append_data(image)
